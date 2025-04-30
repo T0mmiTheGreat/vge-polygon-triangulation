@@ -30,3 +30,8 @@
 *.exe
 *.out
 *.app
+polygon
+
+build/
+.vscode/
+imgui.ini
