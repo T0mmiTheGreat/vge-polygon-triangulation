@@ -11,7 +11,10 @@
 
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <string>
 #include <vector>
 
 #include <SDL2/SDL.h>
@@ -22,6 +25,8 @@
 #include <imgui/backends/imgui_impl_sdl2.h>
 #include <imgui/backends/imgui_impl_sdlrenderer2.h>
 
+namespace fs = std::filesystem;
+
 struct Polygon {
     std::vector<ImVec2> points;
     ImVec2 point_ex;
@@ -30,11 +35,88 @@ struct Polygon {
 
 class Gui {
 private:
+    static constexpr const char *polygons_directory_path = "polygons";
+    // 64 is a nice number...
+#if FILENAME_MAX < 64
+    static constexpr int filename_max = FILENAME_MAX;
+#else
+    static constexpr int filename_max = 64;
+#endif
+
     SDL2pp::SDL sdl;
     SDL2pp::Window window;
     SDL2pp::Renderer renderer;
     Polygon polygon;
     bool is_running;
+    struct {
+        std::vector<fs::path> polygon_filenames;
+        char polygon_filename[filename_max + 1];
+        bool is_show_save_dialog;
+        bool is_show_load_dialog;
+        std::string dialog_message;
+        bool is_show_info_dialog;
+        bool is_show_error_dialog;
+    } dialogs;
+
+    void savePolygon()
+    {
+        fs::path path = fs::path(polygons_directory_path) / fs::path(dialogs.polygon_filename);
+        std::ofstream stm(path);
+        if (!stm) {
+            dialogs.dialog_message = std::string() + "Could not open file \"" + path.string() + "\"";
+            dialogs.is_show_error_dialog = true;
+            return;
+        }
+        for (const auto& pt : polygon.points) {
+            stm << pt.x << " " << pt.y << "\n";
+        }
+        if (!stm) {
+            dialogs.dialog_message = std::string() + "Failed to write file \"" + path.string() + "\"";
+            dialogs.is_show_error_dialog = true;
+        } else {
+            dialogs.dialog_message = std::string() + "Successfully written file \"" + path.string() + "\"";
+            dialogs.is_show_info_dialog = true;
+        }
+    }
+
+    void loadPolygon()
+    {
+        fs::path path = fs::path(polygons_directory_path) / fs::path(dialogs.polygon_filename);
+        std::ifstream stm(path);
+        if (!stm) {
+            dialogs.dialog_message = std::string() + "Could not open file \"" + path.string() + "\"";
+            dialogs.is_show_error_dialog = true;
+            return;
+        }
+        polygon.points.clear();
+        polygon.is_complete = false;
+        std::string buf;
+        ImVec2 pt;
+        const char *nptr;
+        char *endptr;
+        while (std::getline(stm, buf)) {
+            nptr = buf.c_str();
+            pt.x = strtof(nptr, &endptr);
+            if (nptr == endptr) continue;
+            if (*endptr != ' ') continue;
+            nptr = endptr + 1;
+            pt.y = strtof(nptr, &endptr);
+            if (nptr == endptr) continue;
+            if (*endptr != '\0') continue;
+            polygon.points.push_back(pt);
+        }
+        polygon.is_complete = true;
+        dialogs.dialog_message = std::string("Polygon loaded successfully");
+        dialogs.is_show_info_dialog = true;
+    }
+
+    void reloadPaths()
+    {
+        dialogs.polygon_filenames.clear();
+        for (const auto& entry : fs::directory_iterator(polygons_directory_path)) {
+            dialogs.polygon_filenames.push_back(entry.path().filename());
+        }
+    }
 
     void processEvents()
     {
@@ -52,19 +134,97 @@ private:
         }
     }
 
+    bool showImGuiSaveLoadDialog(const char *window_caption, const char *btn_caption)
+    {
+        static size_t selected_item_idx = -1;
+        bool result = false;
+
+        ImGui::Begin(window_caption, NULL, 0);
+
+        if (ImGui::BeginListBox("##listbox 1")) {
+            for (size_t i = 0; i < dialogs.polygon_filenames.size(); ++i) {
+                const bool is_selected = (i == selected_item_idx);
+                if (ImGui::Selectable(dialogs.polygon_filenames[i].c_str(), is_selected)) {
+                    selected_item_idx = i;
+                    strncpy(dialogs.polygon_filename, dialogs.polygon_filenames[i].c_str(), filename_max);
+                    dialogs.polygon_filename[filename_max] = '\0';
+                }
+            }
+            ImGui::EndListBox();
+        }
+        ImGui::InputText("##filename", dialogs.polygon_filename, filename_max + 1);
+        ImGui::SameLine();
+        if (ImGui::Button(btn_caption)) {
+            dialogs.is_show_load_dialog = dialogs.is_show_save_dialog = false;
+            result = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            dialogs.is_show_load_dialog = dialogs.is_show_save_dialog = false;
+        }
+
+        ImGui::End();
+
+        return result;
+    }
+
+    void showImGuiSaveDialog()
+    {
+        if (showImGuiSaveLoadDialog("Save polygon", "Save")) {
+            savePolygon();
+        }
+    }
+
+    void showImGuiLoadDialog()
+    {
+        if (showImGuiSaveLoadDialog("Load polygon", "Load")) {
+            loadPolygon();
+        }
+    }
+
+    void showImGuiMessageDialog(const char *caption)
+    {
+        ImGui::Begin(caption);
+        ImGui::Text("%s", dialogs.dialog_message.c_str());
+        if (ImGui::Button("OK")) {
+            dialogs.is_show_error_dialog = dialogs.is_show_info_dialog = false;
+        }
+        ImGui::End();
+    }
+
+    void showImGuiErrorDialog()
+    {
+        showImGuiMessageDialog("Error");
+    }
+
+    void showImGuiInfoDialog()
+    {
+        showImGuiMessageDialog("Info");
+    }
+
     void showImGuiMenuBar()
     {
         if (ImGui::BeginMenuBar()) {
             if (ImGui::BeginMenu("Polygon")) {
+                ImGui::BeginDisabled(!polygon.is_complete);
                 if (ImGui::MenuItem("Clear")) {
                     polygon.points.clear();
                     polygon.is_complete = false;
                 }
-                if (ImGui::MenuItem("Save")) {}
-                if (ImGui::MenuItem("Load")) {}
+                if (ImGui::MenuItem("Save")) {
+                    reloadPaths();
+                    dialogs.is_show_save_dialog = true;
+                }
+                ImGui::EndDisabled();
+                if (ImGui::MenuItem("Load")) {
+                    reloadPaths();
+                    dialogs.is_show_load_dialog = true;
+                }
                 ImGui::Separator();
+                ImGui::BeginDisabled(!polygon.is_complete);
                 if (ImGui::MenuItem("Trapezoidize")) {}
                 if (ImGui::MenuItem("Triangulate")) {}
+                ImGui::EndDisabled();
                 ImGui::EndMenu();
             }
             ImGui::EndMenuBar();
@@ -97,9 +257,10 @@ private:
                 // Complete the polygon
                 polygon.is_complete = true;
             } else {
-                // 
+                // Show the edge to be added
                 polygon.point_ex = io.MousePos;
                 if (is_left_clicked) {
+                    // Add new vertex
                     polygon.points.push_back(polygon.point_ex);
                 }
             }
@@ -139,12 +300,16 @@ private:
         showImGuiCanvas();
 
         ImGui::End();
-        
-        ImGui::Render();
+
+        if (dialogs.is_show_save_dialog) showImGuiSaveDialog();
+        if (dialogs.is_show_load_dialog) showImGuiLoadDialog();
+        if (dialogs.is_show_error_dialog) showImGuiErrorDialog();
+        if (dialogs.is_show_info_dialog) showImGuiInfoDialog();
     }
 
     void render()
     {
+        ImGui::Render();
         ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer.Get());
         renderer.Present();
     }
@@ -157,6 +322,7 @@ public:
             SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC)
         , polygon{{}, ImVec2(), false}
         , is_running{false}
+        , dialogs{{}, {}, false, false, "", false, false}
     {
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
